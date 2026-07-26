@@ -30,6 +30,10 @@ dist/
 data/state.json
 data/*.tmp
 
+# Runtime logs
+logs/*
+!logs/.gitkeep
+
 # IDE and operating-system files
 .idea/
 .vscode/

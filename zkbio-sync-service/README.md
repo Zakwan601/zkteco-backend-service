@@ -1,61 +1,26 @@
 # ZKBio Sync Service
 
-This Python 3.12+ service performs one complete synchronization from ZKBioTime
-to Supabase and then exits. It does not contain a scheduler.
+The same single-worker scheduler can run with a Tkinter monitoring panel or
+silently in the Windows background. `main.py` remains available for a one-time
+manual synchronization.
 
-## What each run does
 
-1. Authenticates with ZKBioTime using JWT.
-2. Downloads every terminal and upserts each one into Supabase.
-3. Downloads every employee and upserts each one into Supabase.
-4. Reads the last attendance sync timestamp from `data/state.json`.
-5. Downloads attendance starting at that timestamp.
-6. Upserts each downloaded attendance record into Supabase.
-7. Saves the newest successfully uploaded attendance timestamp.
-8. Exits.
+## Background schedules
 
-## Configuration
+When the worker starts, it loads configuration, authenticates once, performs
+one employee sync, and then performs one attendance sync. It continues with:
 
-Create and activate a virtual environment, then install the dependencies:
+- Attendance: every 30 seconds.
+- Employees: every 6 hours.
+- Manual sync commands: handled by the same worker after the active job.
 
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
-```
+There is only one synchronization worker, and per-job locks provide an
+additional guard against overlapping employee or attendance jobs.
 
-Copy `.env.example` to `.env` and provide the connection details:
+## Attendance recovery and duplicate prevention
 
-```env
-ZKBIO_URL=https://your-zkbiotime-server.example.com
-ZKBIO_USERNAME=your_username
-ZKBIO_PASSWORD=your_password
-SUPABASE_URL=https://your-project.supabase.co
-SUPABASE_KEY=your_supabase_key
-```
-
-Use a server-side Supabase `service_role`/secret key. The schema enables RLS,
-and an anonymous/publishable key cannot perform this background sync. Never
-expose the server-side key in a browser or commit `.env`.
-
-## Employee synchronization
-
-Every run downloads all employees from `/personnel/api/employees/`. Each
-ZKBioTime employee is mapped to the existing `students` table:
-
-- `emp_code` becomes both `admission_number` and `biometric_id`.
-- `first_name`, `last_name`, active status, birthday, gender, and address are
-  mapped when available.
-- The upsert uses the unique `students.admission_number` column, so rerunning
-  the service updates the same student instead of inserting a duplicate.
-
-`profile_id` and `class_id` remain unchanged for existing students and are
-`null` for students first created by the sync.
-
-## Attendance synchronization and state
-
-Attendance is incremental. `data/state.json` stores the last successfully
-uploaded attendance timestamp:
+`data/state.json` records the newest attendance timestamp whose full downloaded
+batch was uploaded successfully:
 
 ```json
 {
@@ -63,72 +28,144 @@ uploaded attendance timestamp:
 }
 ```
 
-On the first run, a missing or `null` timestamp defaults to 24 hours before the
-run. The value is sent to `/iclock/api/transactions/` as `start_time`.
+Every attendance request passes this value as `start_time` and follows all API
+pagination links. The state file is not advanced if any upload fails.
 
-Each ZKBioTime transaction is mapped to `device_logs`:
+After a shutdown or PC restart, the previous timestamp is loaded and all missed
+transactions are requested. Attendance is stored in `device_logs`; before an
+insert, the service checks for the same device, biometric ID, and punch time.
+This makes inclusive timestamp queries and failed-batch retries safe.
 
-- `emp_code` becomes `student_biometric_id`.
-- `punch_time` becomes `punched_at`.
-- `terminal_sn` is matched against `devices.device_serial`; the matching
-  `devices.id` UUID is stored as `device_id`.
-- The complete ZKBioTime object is retained in `raw_data`.
-- New logs start with `processed = false`.
+## Employee synchronization
 
-If a terminal has no matching `devices` row, the log is still stored with a
-`null` device ID and a warning is logged. Because the schema has no unique
-constraint for device punches, the service checks for an existing row with the
-same device, biometric ID, and punch time before inserting. Existing logs have
-only `raw_data` refreshed, so their processing status is preserved.
+All ZKBioTime employees are downloaded with pagination and mapped to
+`students`. `emp_code` becomes both `admission_number` and `biometric_id`, and
+the upsert uses the unique `admission_number` column.
 
-After all downloaded attendance rows have been uploaded successfully, the
-service saves the newest `punch_time`. If no new records are returned, the
-existing starting timestamp is retained.
+## JWT behavior
 
-State is not advanced if an upload fails, so the next run can safely retry the
-same range. The application-level duplicate check prevents a retry from
-creating duplicate `device_logs`.
+One `ZKBioClient` instance and its in-memory JWT are reused for the lifetime of
+the worker. A token is not requested on each scheduled run. If an API request
+returns HTTP 401, the existing authentication module obtains a new JWT and
+retries that failed request once.
 
-## Run one synchronization
+Passwords, JWTs, authorization headers, and Supabase keys are never written to
+logs.
 
-Activate the virtual environment and run:
+## Reliability
 
-```powershell
-python main.py
-```
-
-Typical console output:
+Network errors, unavailable services, timeouts, temporary API errors, invalid
+JSON, and Supabase failures are caught by the scheduler. The failed job is
+retried after:
 
 ```text
-Logged into ZKBioTime
-Downloaded 2 devices
-Uploaded 2 devices
-Downloaded 52 employees
-Uploaded 52 employees
-Last sync time: 2026-07-26 10:30:00
-Downloaded 3 new attendance records
-Uploaded 3 attendance records
-Updated sync state
-Synchronization completed successfully
+1, 2, 4, 8, 16, 32, 60, 60, ... seconds
 ```
 
-All database operations are isolated in `supabase_client.py`. The program runs
-once and exits; it does not use `while True` or scheduling.
+A successful run resets that job's delay to one second. Failures do not
+terminate the background process. Existing API calls use request timeouts, and
+all waits are interruptible through `threading.Event`.
 
-## Terminal synchronization helper
+## Run with the Tkinter panel
 
-Every `main.py` run calls `get_all_terminals(client)` to retrieve all terminals
-from `/iclock/api/terminals/`. A terminal is marked online when
-`last_activity` is within two minutes of the server clock.
+```powershell
+.\.venv\Scripts\python.exe app.py
+```
 
-`upsert_device(device)` maps each result to `devices` and upserts on the unique
-`device_serial` column. A missing serial creates a new row; an existing serial
-updates that row. Fields without a dedicated database column, including the
-ZKBioTime numeric ID, terminal timezone, and transfer time, remain available
-in `raw_data`. `get_terminal(client, sn)` remains available when only one
-serial number is needed.
+The worker starts automatically. The panel displays service, ZKBioTime, and
+Supabase status; last employee and attendance times; uploaded attendance
+count; last error; and recent logs.
 
-ZKBioTime device state `1` is stored as `device_state = "active"` with
-`is_active = true`. State `0`, state `3`, and all other values are stored as
-`device_state = "inactive"` with `is_active = false`. This configured state is
-separate from `is_online`, which is calculated from `last_activity`.
+Available controls:
+
+- Start or stop synchronization.
+- Request an employee or attendance sync now.
+- Open the log file.
+- Minimize the window while synchronization continues.
+- Exit gracefully after the current synchronization finishes.
+
+No network request runs on Tkinter's main thread. The UI communicates with the
+background scheduler using thread-safe queues and polls updates with
+`root.after()`.
+
+If `app.py` reports that Tkinter is unavailable, modify or reinstall the
+official Windows Python 3.12 distribution and enable the **Tcl/Tk and IDLE**
+optional feature. Recreate `.venv` afterward. Tkinter is part of Python and
+should not be installed from `pip`.
+
+## Run silently
+
+For a visible console test:
+
+```powershell
+.\.venv\Scripts\python.exe service.py
+```
+
+Press `Ctrl+C` to request a graceful shutdown. The current sync finishes before
+the worker stops and log handlers are flushed.
+
+For normal silent background execution:
+
+```powershell
+.\.venv\Scripts\pythonw.exe service.py
+```
+
+Logs remain available at `logs/sync.log`.
+
+## Windows Task Scheduler
+
+1. Open **Task Scheduler** and choose **Create Task**.
+2. On **General**:
+   - Select **Run whether user is logged on or not**.
+   - Select **Run with highest privileges**.
+3. On **Triggers**, create **At startup**.
+4. On **Actions**, choose **Start a program**:
+   - Program:
+     `C:\Users\USER\Desktop\zkteco backend service\zkbio-sync-service\.venv\Scripts\pythonw.exe`
+   - Arguments:
+     `"C:\Users\USER\Desktop\zkteco backend service\zkbio-sync-service\service.py"`
+   - Start in:
+     `C:\Users\USER\Desktop\zkteco backend service\zkbio-sync-service`
+5. On **Settings**:
+   - Enable **If the task fails, restart every 1 minute**.
+   - Choose an appropriate number of restart attempts.
+   - Enable **Run task as soon as possible after a scheduled start is missed**.
+6. Save the task and provide the Windows account password if requested.
+
+Use Task Scheduler's **End** command to stop a silent scheduled process. An
+ended process may not receive a graceful signal, but attendance state is only
+committed after a complete upload, so the next startup safely retries any
+unfinished range. For a guaranteed graceful stop, run `service.py` with
+`python.exe` and press `Ctrl+C`, or use **Exit** in `app.py`.
+
+## Logging
+
+Logs are sent to both the console and:
+
+```text
+logs/sync.log
+```
+
+`RotatingFileHandler` limits each file to 5 MB and keeps five backups:
+`sync.log.1` through `sync.log.5`.
+
+## Duplicate process protection
+
+`app.py` and `service.py` acquire the same global Windows named mutex. If
+either mode is already active, a second process logs:
+
+```text
+Background sync is already running
+```
+
+and exits without starting another worker.
+
+## One-time synchronization
+
+The existing milestone flow is still available:
+
+```powershell
+.\.venv\Scripts\python.exe main.py
+```
+
+This performs one complete synchronization and exits.
