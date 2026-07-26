@@ -1,54 +1,134 @@
 # ZKBio Sync Service
 
-Milestone 1 is a small Python 3.12+ client that proves communication with
-ZKBioTime. It authenticates with JWT, downloads all employees, and downloads
-attendance transactions. Supabase integration and scheduling are intentionally
-not included.
+This Python 3.12+ service performs one complete synchronization from ZKBioTime
+to Supabase and then exits. It does not contain a scheduler.
 
-## Setup
+## What each run does
 
-Create and activate a virtual environment:
+1. Authenticates with ZKBioTime using JWT.
+2. Downloads every terminal and upserts each one into Supabase.
+3. Downloads every employee and upserts each one into Supabase.
+4. Reads the last attendance sync timestamp from `data/state.json`.
+5. Downloads attendance starting at that timestamp.
+6. Upserts each downloaded attendance record into Supabase.
+7. Saves the newest successfully uploaded attendance timestamp.
+8. Exits.
+
+## Configuration
+
+Create and activate a virtual environment, then install the dependencies:
 
 ```powershell
-py -3.12 -m venv .venv
+python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
 
-Copy `.env.example` to `.env`, then replace the example values:
+Copy `.env.example` to `.env` and provide the connection details:
 
 ```env
 ZKBIO_URL=https://your-zkbiotime-server.example.com
 ZKBIO_USERNAME=your_username
 ZKBIO_PASSWORD=your_password
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_KEY=your_supabase_key
 ```
 
-`ZKBIO_URL` should be the base URL of the ZKBioTime installation. Do not add an
-API endpoint path to it.
+Use a server-side Supabase `service_role`/secret key. The schema enables RLS,
+and an anonymous/publishable key cannot perform this background sync. Never
+expose the server-side key in a browser or commit `.env`.
 
-## Run
+## Employee synchronization
+
+Every run downloads all employees from `/personnel/api/employees/`. Each
+ZKBioTime employee is mapped to the existing `students` table:
+
+- `emp_code` becomes both `admission_number` and `biometric_id`.
+- `first_name`, `last_name`, active status, birthday, gender, and address are
+  mapped when available.
+- The upsert uses the unique `students.admission_number` column, so rerunning
+  the service updates the same student instead of inserting a duplicate.
+
+`profile_id` and `class_id` remain unchanged for existing students and are
+`null` for students first created by the sync.
+
+## Attendance synchronization and state
+
+Attendance is incremental. `data/state.json` stores the last successfully
+uploaded attendance timestamp:
+
+```json
+{
+    "last_sync_time": "2026-07-26 10:30:00"
+}
+```
+
+On the first run, a missing or `null` timestamp defaults to 24 hours before the
+run. The value is sent to `/iclock/api/transactions/` as `start_time`.
+
+Each ZKBioTime transaction is mapped to `device_logs`:
+
+- `emp_code` becomes `student_biometric_id`.
+- `punch_time` becomes `punched_at`.
+- `terminal_sn` is matched against `devices.device_serial`; the matching
+  `devices.id` UUID is stored as `device_id`.
+- The complete ZKBioTime object is retained in `raw_data`.
+- New logs start with `processed = false`.
+
+If a terminal has no matching `devices` row, the log is still stored with a
+`null` device ID and a warning is logged. Because the schema has no unique
+constraint for device punches, the service checks for an existing row with the
+same device, biometric ID, and punch time before inserting. Existing logs have
+only `raw_data` refreshed, so their processing status is preserved.
+
+After all downloaded attendance rows have been uploaded successfully, the
+service saves the newest `punch_time`. If no new records are returned, the
+existing starting timestamp is retained.
+
+State is not advanced if an upload fails, so the next run can safely retry the
+same range. The application-level duplicate check prevents a retry from
+creating duplicate `device_logs`.
+
+## Run one synchronization
+
+Activate the virtual environment and run:
 
 ```powershell
 python main.py
 ```
 
-On success the program prints:
+Typical console output:
 
 ```text
-Logged in successfully
-Employees: <number>
-Attendance records: <number>
+Logged into ZKBioTime
+Downloaded 2 devices
+Uploaded 2 devices
+Downloaded 52 employees
+Uploaded 52 employees
+Last sync time: 2026-07-26 10:30:00
+Downloaded 3 new attendance records
+Uploaded 3 attendance records
+Updated sync state
+Synchronization completed successfully
 ```
 
-## API functions
+All database operations are isolated in `supabase_client.py`. The program runs
+once and exits; it does not use `while True` or scheduling.
 
-- `ZKBioClient.get_token()` authenticates at `/jwt-api-token-auth/` and keeps
-  the JWT in memory.
-- `get_all_employees(client)` downloads `/personnel/api/employees/`.
-- `get_attendance(client, start_time=None, end_time=None)` downloads
-  `/iclock/api/transactions/` and supports optional time filters.
+## Terminal synchronization helper
 
-All authenticated requests include `Authorization: Bearer <token>`. A `401`
-invalidates the cached token, obtains a new token, and retries the failed
-request once. List endpoints follow `next` links when the server returns a
-paginated response.
+Every `main.py` run calls `get_all_terminals(client)` to retrieve all terminals
+from `/iclock/api/terminals/`. A terminal is marked online when
+`last_activity` is within two minutes of the server clock.
+
+`upsert_device(device)` maps each result to `devices` and upserts on the unique
+`device_serial` column. A missing serial creates a new row; an existing serial
+updates that row. Fields without a dedicated database column, including the
+ZKBioTime numeric ID, terminal timezone, and transfer time, remain available
+in `raw_data`. `get_terminal(client, sn)` remains available when only one
+serial number is needed.
+
+ZKBioTime device state `1` is stored as `device_state = "active"` with
+`is_active = true`. State `0`, state `3`, and all other values are stored as
+`device_state = "inactive"` with `is_active = false`. This configured state is
+separate from `is_online`, which is calculated from `last_activity`.
