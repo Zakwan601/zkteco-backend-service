@@ -43,7 +43,17 @@ class ZKBioClient:
         )
         response.raise_for_status()
 
-        payload: Any = response.json()
+        try:
+            payload: Any = response.json()
+        except requests.exceptions.JSONDecodeError as exc:
+            content_type = response.headers.get("Content-Type", "unknown")
+            preview = " ".join(response.text.split())[:240]
+            detail = f": {preview}" if preview else ""
+            raise ValueError(
+                "ZKBioTime authentication service returned a non-JSON "
+                f"response (HTTP {response.status_code}, {content_type})"
+                f"{detail}"
+            ) from exc
         if not isinstance(payload, dict):
             raise ValueError("ZKBioTime authentication returned invalid JSON")
 

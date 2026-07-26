@@ -7,7 +7,14 @@ from auth import ZKBioClient
 from config import load_settings
 from employees import get_all_employees
 from logger import configure_logging
-from state import get_attendance_timestamp, load_last_sync_time, save_last_sync_time
+from state import (
+    get_attendance_timestamp,
+    load_last_sync_time,
+    load_record_fingerprints,
+    record_fingerprint,
+    save_last_sync_time,
+    save_record_fingerprint,
+)
 from supabase_client import (
     configure_supabase,
     upsert_attendance,
@@ -35,16 +42,32 @@ def main() -> None:
     terminals = get_all_terminals(client)
     logger.info("Downloaded %d devices", len(terminals))
 
+    device_fingerprints = load_record_fingerprints("devices")
+    uploaded_devices = 0
     for terminal in terminals:
+        serial = str(terminal.get("sn") or "").strip()
+        fingerprint = record_fingerprint(terminal)
+        if serial and device_fingerprints.get(serial) == fingerprint:
+            continue
         upsert_device(terminal)
-    logger.info("Uploaded %d devices", len(terminals))
+        save_record_fingerprint("devices", serial, fingerprint)
+        uploaded_devices += 1
+    logger.info("Uploaded %d changed devices", uploaded_devices)
 
     employees = get_all_employees(client)
     logger.info("Downloaded %d employees", len(employees))
 
+    employee_fingerprints = load_record_fingerprints("employees")
+    uploaded_employees = 0
     for employee in employees:
+        employee_code = str(employee.get("emp_code") or "").strip()
+        fingerprint = record_fingerprint(employee)
+        if employee_code and employee_fingerprints.get(employee_code) == fingerprint:
+            continue
         upsert_employee(employee)
-    logger.info("Uploaded %d employees", len(employees))
+        save_record_fingerprint("employees", employee_code, fingerprint)
+        uploaded_employees += 1
+    logger.info("Uploaded %d changed employees", uploaded_employees)
 
     last_sync_time = load_last_sync_time()
     logger.info("Last sync time: %s", last_sync_time)

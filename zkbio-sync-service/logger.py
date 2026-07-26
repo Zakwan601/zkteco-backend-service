@@ -4,8 +4,16 @@ import logging
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from queue import Queue
+import sys
 
-LOG_DIRECTORY = Path(__file__).resolve().parent / "logs"
+
+def _runtime_root() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+LOG_DIRECTORY = _runtime_root() / "logs"
 LOG_FILE = LOG_DIRECTORY / "sync.log"
 MAX_LOG_BYTES = 5 * 1024 * 1024
 BACKUP_COUNT = 5

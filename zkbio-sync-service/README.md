@@ -1,171 +1,212 @@
-# ZKBio Sync Service
+# ZKBioTime Attendance Sync
 
-The same single-worker scheduler can run with a Tkinter monitoring panel or
-silently in the Windows background. `main.py` remains available for a one-time
-manual synchronization.
+A Windows desktop and system-tray application that runs the
+ZKBioTime-to-Supabase synchronization in a background worker.
 
+```text
+ZKBioTime → existing main.main() sync → Supabase
+```
 
-## Background schedules
+The desktop interface is intended for non-technical school administrators. It
+starts in the Windows notification area, runs synchronization on a background
+Qt thread, displays connection and log information, and can launch
+automatically with Windows.
 
-When the worker starts, it loads configuration, authenticates once, performs
-one employee sync, and then performs one attendance sync. It continues with:
+## Project structure
 
-- Attendance: every 30 seconds.
-- Employees: every 6 hours.
-- Manual sync commands: handled by the same worker after the active job.
+```text
+app.py                    PySide6 desktop entry point
+qt_app.py                 Qt application bootstrap and single-instance guard
+desktop_gui.py            Dashboard, settings, tray icon, and controller
+desktop_settings.py       QSettings and .env persistence
+desktop_utils.py          Windows startup, icons, logs, and runtime paths
+sync_worker.py             QThread wrapper around existing main.main()
+main.py                   Existing one-time synchronization (unchanged)
+service.py                Existing silent scheduler mode
+scheduler.py              Existing background scheduler
+auth.py                   ZKBioTime JWT client
+employees.py              Employee API and pagination
+attendance.py             Attendance API and pagination
+terminals.py              Terminal API
+supabase_client.py         Supabase mappings and upserts
+state.py                  Incremental attendance state
+logger.py                 Console and rotating-file logging
+logs/sync.log             Runtime log
+ZKBioSyncService.spec     PyInstaller one-file build
+build_exe.bat             Windows build command
+```
 
-There is only one synchronization worker, and per-job locks provide an
-additional guard against overlapping employee or attendance jobs.
+## Install
+
+Use Python 3.12 or newer. In Command Prompt:
+
+```bat
+cd /d "C:\Users\USER\Desktop\zkteco backend service\zkbio-sync-service"
+set PYTHONHOME=
+
+py -3.12 -m venv .venv
+.venv\Scripts\activate.bat
+python -m pip install --upgrade pip
+python -m pip install --no-cache-dir -r requirements.txt
+```
+
+`PYTHONHOME` is cleared because the ZKBioTime installation may set it to its
+embedded Python 3.11 runtime, which is incompatible with this Python 3.12
+virtual environment.
+
+## Configuration
+
+The application reads `.env` beside the source files or packaged executable:
+
+```env
+ZKBIO_URL=http://127.0.0.1:78
+ZKBIO_USERNAME=your_username
+ZKBIO_PASSWORD=your_password
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_KEY=your_server_side_key
+```
+
+These values can also be edited from the desktop Settings page. Secrets remain
+in `.env`, which is excluded by `.gitignore`.
+
+## Run the desktop application
+
+```bat
+set PYTHONHOME=
+.venv\Scripts\activate.bat
+python app.py
+```
+
+The application starts minimized to the system tray by default and performs an
+initial synchronization. It then synchronizes every 60 seconds. The interval
+is configurable from 15 seconds to 24 hours.
+
+The tray icon indicates:
+
+- Green: connected/idle
+- Yellow: synchronization in progress
+- Red: the latest synchronization failed
+
+Right-click the tray icon for:
+
+- Sync Now
+- Dashboard
+- Settings
+- View Logs
+- About
+- Exit
+
+Closing the window hides it in the tray instead of terminating it. A notice is
+shown the first time. Use **Exit** from the tray or application to stop it.
+When a sync is active, Exit waits for `main.main()` to finish.
+
+## Dashboard
+
+The dashboard displays:
+
+- ZKBioTime status
+- Supabase status
+- Last successful desktop synchronization
+- Current synchronization interval
+- Recent messages from `logs/sync.log`
+
+The interface never performs API work on the Qt main thread.
+`SyncWorker(QThread)` imports and calls the existing `main.main()` function.
+If a scheduled run is still active, an overlapping run is skipped.
+
+## Settings
+
+The Settings page supports:
+
+- ZKBioTime URL, username, and password
+- Supabase URL and key
+- Synchronization interval
+- Launch after Windows login
+- Start minimized
+- Windows notifications
+
+The Windows startup option writes a per-user entry under:
+
+```text
+HKCU\Software\Microsoft\Windows\CurrentVersion\Run
+```
+
+It can be disabled again from the same Settings page.
 
 ## Attendance recovery and duplicate prevention
 
-`data/state.json` records the newest attendance timestamp whose full downloaded
-batch was uploaded successfully:
+The existing `data/state.json` logic remains active. Attendance is requested
+using the last successfully uploaded punch timestamp. The state file advances
+only after a full downloaded batch uploads successfully.
 
-```json
-{
-    "last_sync_time": "2026-07-26 10:30:00"
-}
-```
+The same state file stores non-reversible fingerprints for successfully
+uploaded devices and employees. A record is sent to Supabase only when it is
+new or its ZKBioTime data changed. If devices, employees, and attendance are
+all unchanged, the sync performs no Supabase HTTP requests. A fingerprint is
+saved only after its corresponding Supabase upload succeeds.
 
-Every attendance request passes this value as `start_time` and follows all API
-pagination links. The state file is not advanced if any upload fails.
-
-After a shutdown or PC restart, the previous timestamp is loaded and all missed
-transactions are requested. Attendance is stored in `device_logs`; before an
-insert, the service checks for the same device, biometric ID, and punch time.
-This makes inclusive timestamp queries and failed-batch retries safe.
-
-## Employee synchronization
-
-All ZKBioTime employees are downloaded with pagination and mapped to
-`students`. `emp_code` becomes both `admission_number` and `biometric_id`, and
-the upsert uses the unique `admission_number` column.
+After a shutdown or PC restart, the next synchronization requests everything
+newer than the saved timestamp. Existing Supabase logic checks for the same
+device, biometric ID, and punch time before inserting, preventing duplicates
+after retries.
 
 ## JWT behavior
 
-One `ZKBioClient` instance and its in-memory JWT are reused for the lifetime of
-the worker. A token is not requested on each scheduled run. If an API request
-returns HTTP 401, the existing authentication module obtains a new JWT and
-retries that failed request once.
-
-Passwords, JWTs, authorization headers, and Supabase keys are never written to
-logs.
-
-## Reliability
-
-Network errors, unavailable services, timeouts, temporary API errors, invalid
-JSON, and Supabase failures are caught by the scheduler. The failed job is
-retried after:
-
-```text
-1, 2, 4, 8, 16, 32, 60, 60, ... seconds
-```
-
-A successful run resets that job's delay to one second. Failures do not
-terminate the background process. Existing API calls use request timeouts, and
-all waits are interruptible through `threading.Event`.
-
-## Run with the Tkinter panel
-
-```powershell
-.\.venv\Scripts\python.exe app.py
-```
-
-The worker starts automatically. The panel displays service, ZKBioTime, and
-Supabase status; last employee and attendance times; uploaded attendance
-count; last error; and recent logs.
-
-Available controls:
-
-- Start or stop synchronization.
-- Request an employee or attendance sync now.
-- Open the log file.
-- Minimize the window while synchronization continues.
-- Exit gracefully after the current synchronization finishes.
-
-No network request runs on Tkinter's main thread. The UI communicates with the
-background scheduler using thread-safe queues and polls updates with
-`root.after()`.
-
-If `app.py` reports that Tkinter is unavailable, modify or reinstall the
-official Windows Python 3.12 distribution and enable the **Tcl/Tk and IDLE**
-optional feature. Recreate `.venv` afterward. Tkinter is part of Python and
-should not be installed from `pip`.
-
-## Run silently
-
-For a visible console test:
-
-```powershell
-.\.venv\Scripts\python.exe service.py
-```
-
-Press `Ctrl+C` to request a graceful shutdown. The current sync finishes before
-the worker stops and log handlers are flushed.
-
-For normal silent background execution:
-
-```powershell
-.\.venv\Scripts\pythonw.exe service.py
-```
-
-Logs remain available at `logs/sync.log`.
-
-## Windows Task Scheduler
-
-1. Open **Task Scheduler** and choose **Create Task**.
-2. On **General**:
-   - Select **Run whether user is logged on or not**.
-   - Select **Run with highest privileges**.
-3. On **Triggers**, create **At startup**.
-4. On **Actions**, choose **Start a program**:
-   - Program:
-     `C:\Users\USER\Desktop\zkteco backend service\zkbio-sync-service\.venv\Scripts\pythonw.exe`
-   - Arguments:
-     `"C:\Users\USER\Desktop\zkteco backend service\zkbio-sync-service\service.py"`
-   - Start in:
-     `C:\Users\USER\Desktop\zkteco backend service\zkbio-sync-service`
-5. On **Settings**:
-   - Enable **If the task fails, restart every 1 minute**.
-   - Choose an appropriate number of restart attempts.
-   - Enable **Run task as soon as possible after a scheduled start is missed**.
-6. Save the task and provide the Windows account password if requested.
-
-Use Task Scheduler's **End** command to stop a silent scheduled process. An
-ended process may not receive a graceful signal, but attendance state is only
-committed after a complete upload, so the next startup safely retries any
-unfinished range. For a guaranteed graceful stop, run `service.py` with
-`python.exe` and press `Ctrl+C`, or use **Exit** in `app.py`.
+The existing ZKBioTime client handles JWT authentication and one retry after
+HTTP 401. Because each `main.main()` call creates its own one-time sync client,
+the desktop wrapper does not inspect, display, or log JWTs.
 
 ## Logging
 
-Logs are sent to both the console and:
+Logs are written to:
 
 ```text
-logs/sync.log
+logs\sync.log
 ```
 
-`RotatingFileHandler` limits each file to 5 MB and keeps five backups:
-`sync.log.1` through `sync.log.5`.
+The log rotates at 5 MB and retains five backup files. The packaged executable
+creates its `logs` and `data` folders beside the executable so state and logs
+remain persistent.
 
-## Duplicate process protection
+Passwords, JWTs, authorization headers, and Supabase keys must never be added
+to log messages.
 
-`app.py` and `service.py` acquire the same global Windows named mutex. If
-either mode is already active, a second process logs:
+## Build a single Windows executable
+
+After installing requirements:
+
+```bat
+cd /d "C:\Users\USER\Desktop\zkteco backend service\zkbio-sync-service"
+set PYTHONHOME=
+build_exe.bat
+```
+
+Or invoke PyInstaller directly:
+
+```bat
+.venv\Scripts\python.exe -m PyInstaller --noconfirm --clean ZKBioSyncService.spec
+```
+
+The output is:
 
 ```text
-Background sync is already running
+dist\ZKBioSyncService.exe
 ```
 
-and exits without starting another worker.
+The build is a single windowed executable. Place `.env` beside it, or open the
+tray Settings page and save the connection values. The application creates
+`data\state.json` and `logs\sync.log` beside the executable as needed.
 
-## One-time synchronization
+## Existing run modes
 
-The existing milestone flow is still available:
+The original one-time synchronization remains available:
 
-```powershell
-.\.venv\Scripts\python.exe main.py
+```bat
+python main.py
 ```
 
-This performs one complete synchronization and exits.
+The existing non-GUI scheduler remains available:
+
+```bat
+python service.py
+```

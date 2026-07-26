@@ -4,7 +4,8 @@ from datetime import datetime
 import logging
 from typing import Any
 
-from supabase import Client, create_client
+import httpx
+from supabase import Client, ClientOptions, create_client
 
 STUDENTS_TABLE = "students"
 DEVICES_TABLE = "devices"
@@ -12,14 +13,31 @@ DEVICE_LOGS_TABLE = "device_logs"
 EMPLOYEE_CONFLICT_COLUMN = "admission_number"
 
 _client: Client | None = None
+_http_client: httpx.Client | None = None
 _device_id_cache: dict[str, str | None] = {}
 logger = logging.getLogger(__name__)
 
 
 def configure_supabase(url: str, key: str) -> None:
     """Create the shared Supabase client used by database helpers."""
-    global _client
-    _client = create_client(url, key)
+    global _client, _http_client
+
+    if _http_client is not None:
+        _http_client.close()
+
+    # Some Windows/network combinations terminate Supabase's reused HTTP/2
+    # connection after the first request. HTTP/1.1 is fully supported by
+    # PostgREST and avoids aborting the remaining records in a sync run.
+    _http_client = httpx.Client(
+        http2=False,
+        follow_redirects=True,
+        timeout=httpx.Timeout(30.0),
+    )
+    options = ClientOptions(
+        httpx_client=_http_client,
+        postgrest_client_timeout=30,
+    )
+    _client = create_client(url, key, options=options)
     _device_id_cache.clear()
 
 
