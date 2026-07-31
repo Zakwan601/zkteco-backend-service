@@ -222,6 +222,12 @@ def _find_existing_log(
 
 def upsert_attendance(attendance: dict[str, Any]) -> Any:
     """Map a ZKBioTime punch to device_logs without creating duplicates."""
+    _inserted, response = upsert_attendance_with_status(attendance)
+    return response
+
+
+def upsert_attendance_with_status(attendance: dict[str, Any]) -> tuple[bool, Any]:
+    """Upsert a punch and return whether a new device_logs row was inserted."""
     student_biometric_id = _required_text(
         attendance,
         "emp_code",
@@ -236,13 +242,14 @@ def upsert_attendance(attendance: dict[str, Any]) -> Any:
     )
 
     if existing_log_id is not None:
-        return (
+        response = (
             _get_client()
             .table(DEVICE_LOGS_TABLE)
             .update({"raw_data": attendance})
             .eq("id", existing_log_id)
             .execute()
         )
+        return False, response
 
     payload = {
         "device_id": device_id,
@@ -251,4 +258,5 @@ def upsert_attendance(attendance: dict[str, Any]) -> Any:
         "processed": False,
         "raw_data": attendance,
     }
-    return _get_client().table(DEVICE_LOGS_TABLE).insert(payload).execute()
+    response = _get_client().table(DEVICE_LOGS_TABLE).insert(payload).execute()
+    return True, response

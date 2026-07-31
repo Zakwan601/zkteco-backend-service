@@ -230,6 +230,26 @@ newer than the saved timestamp. Existing Supabase logic checks for the same
 device, biometric ID, and punch time before inserting, preventing duplicates
 after retries.
 
+## Daily attendance generation
+
+After one or more new punch rows are inserted, the service calls the Supabase
+`sync-attendance` Edge Function once for every affected `Asia/Dhaka` date. It
+also calls the function for the current Dhaka date at application startup and
+when the local date changes. Successful duplicate checks do not trigger extra
+calls.
+
+Set the shared function secret in `.env`:
+
+```text
+SYNC_ATTENDANCE_SECRET=your_sync_attendance_edge_function_secret
+```
+
+The endpoint defaults to
+`SUPABASE_URL/functions/v1/sync-attendance`. It can be overridden with
+`SYNC_ATTENDANCE_URL`. Dates awaiting recalculation are saved in
+`data/state.json`, so a failed function request is logged and retried on the
+next synchronization interval without losing the newly inserted punches.
+
 ## JWT behavior
 
 The existing ZKBioTime client handles JWT authentication and one retry after

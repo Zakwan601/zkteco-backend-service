@@ -3,6 +3,12 @@
 import logging
 
 from attendance import get_attendance
+from attendance_sync import (
+    ensure_current_day_synced,
+    punch_date,
+    queue_attendance_day,
+    sync_pending_attendance_days,
+)
 from auth import ZKBioClient
 from biotime_recovery import (
     BioTimeRecoveryError,
@@ -30,7 +36,7 @@ from state import (
 )
 from supabase_client import (
     configure_supabase,
-    upsert_attendance,
+    upsert_attendance_with_status,
     upsert_device,
     upsert_employee,
 )
@@ -42,6 +48,10 @@ logger = logging.getLogger(__name__)
 def main(progress_callback: ProgressCallback | None = None) -> None:
     configure_logging()
     settings = load_settings()
+    ensure_current_day_synced(
+        settings.sync_attendance_url,
+        settings.sync_attendance_secret,
+    )
     publish_safely(
         "sync started",
         publish_sync_started,
@@ -104,9 +114,18 @@ def main(progress_callback: ProgressCallback | None = None) -> None:
 
         uploaded_timestamps: list[str] = []
         for attendance in attendance_records:
-            upsert_attendance(attendance)
-            uploaded_timestamps.append(get_attendance_timestamp(attendance))
+            inserted, _response = upsert_attendance_with_status(attendance)
+            timestamp = get_attendance_timestamp(attendance)
+            uploaded_timestamps.append(timestamp)
+            if inserted:
+                selected_date = punch_date(timestamp)
+                queue_attendance_day(selected_date)
         logger.info("Uploaded %d attendance records", len(attendance_records))
+
+        sync_pending_attendance_days(
+            settings.sync_attendance_url,
+            settings.sync_attendance_secret,
+        )
 
         newest_sync_time = max(uploaded_timestamps, default=last_sync_time)
         save_last_sync_time(newest_sync_time)
@@ -125,6 +144,7 @@ def main(progress_callback: ProgressCallback | None = None) -> None:
             for secret in (
                 settings.zkbio_password,
                 settings.supabase_key,
+                settings.sync_attendance_secret,
                 settings.discord_webhook_url,
             ):
                 if secret:

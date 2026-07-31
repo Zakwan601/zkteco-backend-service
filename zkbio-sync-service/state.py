@@ -10,6 +10,7 @@ STATE_FILE = Path(__file__).resolve().parent / "data" / "state.json"
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 ATTENDANCE_TIMESTAMP_FIELDS = ("punch_time", "timestamp", "att_time")
 RECORD_FINGERPRINTS_KEY = "record_fingerprints"
+PENDING_ATTENDANCE_DATES_KEY = "pending_attendance_dates"
 
 
 def _default_last_sync_time() -> str:
@@ -60,6 +61,32 @@ def save_last_sync_time(last_sync_time: str) -> None:
 
     payload = _read_state()
     payload["last_sync_time"] = last_sync_time
+    _write_state(payload)
+
+
+def load_pending_attendance_dates() -> set[str]:
+    """Return dates whose daily attendance recalculation has not succeeded."""
+    values = _read_state().get(PENDING_ATTENDANCE_DATES_KEY, [])
+    if not isinstance(values, list):
+        return set()
+    return {value for value in values if isinstance(value, str) and value}
+
+
+def add_pending_attendance_date(selected_date: str) -> None:
+    """Persist a day before requesting its attendance recalculation."""
+    payload = _read_state()
+    pending_dates = load_pending_attendance_dates()
+    pending_dates.add(selected_date)
+    payload[PENDING_ATTENDANCE_DATES_KEY] = sorted(pending_dates)
+    _write_state(payload)
+
+
+def remove_pending_attendance_date(selected_date: str) -> None:
+    """Clear a day only after its attendance recalculation succeeds."""
+    payload = _read_state()
+    pending_dates = load_pending_attendance_dates()
+    pending_dates.discard(selected_date)
+    payload[PENDING_ATTENDANCE_DATES_KEY] = sorted(pending_dates)
     _write_state(payload)
 
 

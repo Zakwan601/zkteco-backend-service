@@ -11,13 +11,23 @@ import time
 from typing import Any
 
 from attendance import get_attendance
+from attendance_sync import (
+    ensure_current_day_synced,
+    punch_date,
+    queue_attendance_day,
+    sync_pending_attendance_days,
+)
 from auth import ZKBioClient
 from biotime_recovery import ensure_biotime_available
 from config import Settings, load_settings
 from employees import get_all_employees
 from state import get_attendance_timestamp, load_last_sync_time, save_last_sync_time
 from service_status import publish_heartbeat, publish_safely, publish_stopped
-from supabase_client import configure_supabase, upsert_attendance, upsert_employee
+from supabase_client import (
+    configure_supabase,
+    upsert_attendance_with_status,
+    upsert_employee,
+)
 
 ATTENDANCE_INTERVAL_SECONDS = 30
 EMPLOYEE_INTERVAL_SECONDS = 6 * 60 * 60
@@ -173,6 +183,7 @@ class BackgroundScheduler:
             secrets = (
                 self._settings.zkbio_password,
                 self._settings.supabase_key,
+                self._settings.sync_attendance_secret,
             )
             for secret in secrets:
                 if secret:
@@ -210,6 +221,10 @@ class BackgroundScheduler:
                 configure_supabase(
                     self._settings.supabase_url,
                     self._settings.supabase_key,
+                )
+                ensure_current_day_synced(
+                    self._settings.sync_attendance_url,
+                    self._settings.sync_attendance_secret,
                 )
                 self._set_status(supabase_status="Configured")
                 ensure_biotime_available(
@@ -288,6 +303,12 @@ class BackgroundScheduler:
             raise
 
         if not records:
+            if self._settings is None:
+                raise RuntimeError("Scheduler settings are not initialized")
+            sync_pending_attendance_days(
+                self._settings.sync_attendance_url,
+                self._settings.sync_attendance_secret,
+            )
             completed_at = datetime.now().astimezone().isoformat(timespec="seconds")
             self._set_status(
                 last_attendance_sync=completed_at,
@@ -299,8 +320,19 @@ class BackgroundScheduler:
         uploaded_timestamps: list[str] = []
         try:
             for record in records:
-                upsert_attendance(record)
-                uploaded_timestamps.append(get_attendance_timestamp(record))
+                inserted, _response = upsert_attendance_with_status(record)
+                timestamp = get_attendance_timestamp(record)
+                uploaded_timestamps.append(timestamp)
+                if inserted:
+                    selected_date = punch_date(timestamp)
+                    queue_attendance_day(selected_date)
+
+            if self._settings is None:
+                raise RuntimeError("Scheduler settings are not initialized")
+            sync_pending_attendance_days(
+                self._settings.sync_attendance_url,
+                self._settings.sync_attendance_secret,
+            )
             self._set_status(supabase_status="Connected")
         except Exception:
             self._set_status(supabase_status="Upload failed")
@@ -360,6 +392,15 @@ class BackgroundScheduler:
         attendance_due = self._run_job("attendance")
 
         while not self._stop_event.is_set():
+            if self._settings is not None:
+                try:
+                    ensure_current_day_synced(
+                        self._settings.sync_attendance_url,
+                        self._settings.sync_attendance_secret,
+                    )
+                except Exception as error:
+                    self._record_error("Daily attendance sync failed", error)
+
             try:
                 command = self._commands.get_nowait()
             except Empty:
