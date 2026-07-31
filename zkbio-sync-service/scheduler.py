@@ -15,11 +15,13 @@ from auth import ZKBioClient
 from config import Settings, load_settings
 from employees import get_all_employees
 from state import get_attendance_timestamp, load_last_sync_time, save_last_sync_time
+from service_status import publish_heartbeat, publish_safely, publish_stopped
 from supabase_client import configure_supabase, upsert_attendance, upsert_employee
 
 ATTENDANCE_INTERVAL_SECONDS = 30
 EMPLOYEE_INTERVAL_SECONDS = 6 * 60 * 60
 MAX_BACKOFF_SECONDS = 60
+HEARTBEAT_INTERVAL_SECONDS = 5 * 60
 MUTEX_NAME = r"Global\ZKBioTimeSupabaseSyncService"
 ERROR_ALREADY_EXISTS = 183
 ERROR_ACCESS_DENIED = 5
@@ -328,6 +330,15 @@ class BackgroundScheduler:
         if not self._initialize():
             return
 
+        if self._settings is not None:
+            publish_safely(
+                "executable heartbeat",
+                publish_heartbeat,
+                self._settings.supabase_url,
+                self._settings.supabase_key,
+            )
+        heartbeat_due = time.monotonic() + HEARTBEAT_INTERVAL_SECONDS
+
         employee_due = self._run_job("employee")
         if self._stop_event.is_set():
             return
@@ -347,6 +358,16 @@ class BackgroundScheduler:
                 continue
 
             now = time.monotonic()
+            if now >= heartbeat_due:
+                if self._settings is not None:
+                    publish_safely(
+                        "executable heartbeat",
+                        publish_heartbeat,
+                        self._settings.supabase_url,
+                        self._settings.supabase_key,
+                    )
+                heartbeat_due = now + HEARTBEAT_INTERVAL_SECONDS
+                continue
             if now >= attendance_due:
                 attendance_due = self._run_job("attendance")
                 continue
@@ -354,7 +375,7 @@ class BackgroundScheduler:
                 employee_due = self._run_job("employee")
                 continue
 
-            self._wait(min(attendance_due, employee_due) - now)
+            self._wait(min(attendance_due, employee_due, heartbeat_due) - now)
 
     def _worker_entry(self) -> None:
         logger.info("Background service started")
@@ -374,5 +395,12 @@ class BackgroundScheduler:
                         break
                     restart_delay = min(restart_delay * 2, MAX_BACKOFF_SECONDS)
         finally:
+            if self._settings is not None:
+                publish_safely(
+                    "executable shutdown",
+                    publish_stopped,
+                    self._settings.supabase_url,
+                    self._settings.supabase_key,
+                )
             self._set_status(service_status="Stopped")
             logger.info("Background service stopped")

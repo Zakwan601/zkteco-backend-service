@@ -114,6 +114,30 @@ The interface never performs API work on the Qt main thread.
 `SyncWorker(QThread)` imports and calls the existing `main.main()` function.
 If a scheduled run is still active, an overlapping run is skipped.
 
+## Frontend service status
+
+Run `supabase_service_status.sql` once in the Supabase SQL editor. The desktop
+executable then publishes a heartbeat every five minutes and records the start,
+success, or failure of each complete synchronization.
+Startup sets the service online immediately, and a normal application or
+service shutdown sets it offline immediately.
+
+Read the computed view from the frontend:
+
+```javascript
+const { data, error } = await supabase
+  .from('sync_service_health')
+  .select('*')
+  .eq('service_key', 'zkbio-sync-service')
+  .single()
+```
+
+Use `data.is_running` for the executable state and `data.last_sync_at` for the
+last successful sync. `is_running` automatically becomes false when no
+heartbeat has arrived for 10 minutes, including after a crash or PC shutdown.
+The timeout is a fallback for forced termination and power loss, when the
+executable has no opportunity to send its immediate offline update.
+
 ## Settings
 
 The Settings page supports:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QAction, QCloseEvent, QFont
@@ -35,6 +36,8 @@ from desktop_utils import (
     read_recent_logs,
 )
 from sync_worker import SyncWorker
+
+HEARTBEAT_INTERVAL_MILLISECONDS = 5 * 60 * 1000
 
 logger = logging.getLogger(__name__)
 
@@ -165,6 +168,8 @@ class MainWindow(QMainWindow):
         self.worker = SyncWorker(self)
         self.allow_exit = False
         self.pending_exit = False
+        self._stopped_reported = False
+        self._heartbeat_lock = threading.Lock()
 
         self.setWindowTitle("School Attendance Sync")
         self.setMinimumSize(940, 650)
@@ -199,6 +204,10 @@ class MainWindow(QMainWindow):
         self.log_timer.timeout.connect(self.refresh_logs)
         self.log_timer.start(2000)
 
+        self.heartbeat_timer = QTimer(self)
+        self.heartbeat_timer.timeout.connect(self.request_heartbeat)
+        self.heartbeat_timer.start(HEARTBEAT_INTERVAL_MILLISECONDS)
+
         self.worker.sync_started.connect(self.on_sync_started)
         self.worker.sync_succeeded.connect(self.on_sync_succeeded)
         self.worker.sync_failed.connect(self.on_sync_failed)
@@ -206,6 +215,7 @@ class MainWindow(QMainWindow):
 
         self.refresh_settings_form()
         self.refresh_logs()
+        QTimer.singleShot(100, self.request_heartbeat)
         QTimer.singleShot(700, self.request_sync)
 
     def _build_shell(self) -> QWidget:
@@ -465,6 +475,53 @@ class MainWindow(QMainWindow):
             return
         self.worker.start()
 
+    def request_heartbeat(self) -> None:
+        """Publish a heartbeat without blocking the Qt interface."""
+        if self._stopped_reported:
+            return
+        if not self._heartbeat_lock.acquire(blocking=False):
+            return
+        threading.Thread(
+            target=self._publish_heartbeat,
+            name="supabase-heartbeat",
+            daemon=True,
+        ).start()
+
+    def _publish_heartbeat(self) -> None:
+        try:
+            from config import load_settings
+            from service_status import publish_heartbeat
+
+            connections = load_settings()
+            publish_heartbeat(
+                connections.supabase_url,
+                connections.supabase_key,
+            )
+        except Exception as error:
+            logger.warning("Could not publish executable heartbeat: %s", error)
+        finally:
+            self._heartbeat_lock.release()
+
+    def report_stopped(self) -> None:
+        """Tell Supabase immediately when the application exits normally."""
+        if self._stopped_reported:
+            return
+        self._stopped_reported = True
+        # Wait for any in-flight heartbeat so it cannot overwrite the offline
+        # state after this final request completes.
+        with self._heartbeat_lock:
+            try:
+                from config import load_settings
+                from service_status import publish_stopped
+
+                connections = load_settings()
+                publish_stopped(
+                    connections.supabase_url,
+                    connections.supabase_key,
+                )
+            except Exception as error:
+                logger.warning("Could not publish executable shutdown: %s", error)
+
     def on_sync_started(self) -> None:
         self.set_status_icon("syncing")
         self.zkbio_card.set_value("Synchronizing", YELLOW)
@@ -614,6 +671,7 @@ class MainWindow(QMainWindow):
     def exit_application(self) -> None:
         self.sync_timer.stop()
         self.log_timer.stop()
+        self.heartbeat_timer.stop()
         if self.worker.isRunning():
             self.pending_exit = True
             self.hide()

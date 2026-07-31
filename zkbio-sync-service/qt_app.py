@@ -51,6 +51,7 @@ def main() -> int:
         window.show()
 
     def cleanup() -> None:
+        window.report_stopped()
         instance_lock.release()
         flush_logs()
 
