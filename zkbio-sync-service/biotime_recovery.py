@@ -7,6 +7,7 @@ import os
 import platform
 import re
 import subprocess
+import threading
 import time
 
 import requests
@@ -34,6 +35,8 @@ DISCORD_ALERT_COOLDOWN_SECONDS = 30 * 60
 
 logger = logging.getLogger(__name__)
 _last_discord_alert_at = 0.0
+_discord_event_times: dict[str, float] = {}
+_discord_event_lock = threading.Lock()
 
 
 class BioTimeRecoveryError(RuntimeError):
@@ -190,6 +193,61 @@ def send_discord_alert(
     return "Discord alert sent"
 
 
+def send_discord_event(
+    webhook_url: str,
+    title: str,
+    description: str,
+    color: int = 3447003,
+    cooldown_key: str = "",
+    cooldown_seconds: int = 0,
+) -> tuple[bool, str]:
+    """Send an important lifecycle/operational event to Discord."""
+    if not webhook_url:
+        return False, "Discord webhook is not configured"
+    if not webhook_url.startswith("https://discord.com/api/webhooks/"):
+        return False, "Discord webhook URL is invalid"
+
+    with _discord_event_lock:
+        now = time.monotonic()
+        previous = _discord_event_times.get(cooldown_key, 0.0)
+        if cooldown_key and previous and now - previous < cooldown_seconds:
+            return False, "Discord event suppressed by cooldown"
+
+        payload = {
+            "username": "BioTime Service Monitor",
+            "allowed_mentions": {"parse": []},
+            "embeds": [
+                {
+                    "title": title[:256],
+                    "description": description[:4096],
+                    "color": color,
+                    "fields": [
+                        {
+                            "name": "Computer",
+                            "value": platform.node() or "Unknown",
+                        }
+                    ],
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            ],
+        }
+        try:
+            response = requests.post(
+                webhook_url,
+                params={"wait": "true"},
+                json=payload,
+                timeout=DISCORD_TIMEOUT_SECONDS,
+            )
+        except requests.RequestException as error:
+            return False, f"Discord request failed ({type(error).__name__})"
+        if not response.ok:
+            return False, f"Discord rejected the event (HTTP {response.status_code})"
+
+        if cooldown_key:
+            _discord_event_times[cooldown_key] = now
+        return True, "Discord event sent"
+
+
 def send_discord_test(webhook_url: str) -> tuple[bool, str]:
     """Send a user-requested test message without affecting alert cooldown."""
     if not webhook_url:
@@ -342,4 +400,17 @@ def ensure_biotime_available(
         "BioTime recovery succeeded",
         "The API is responding and synchronization will continue.",
         "success",
+    )
+    action_summary = "\n".join(recovery_actions) or "API recovered after retry"
+    _sent, event_result = send_discord_event(
+        discord_webhook_url,
+        "BioTime recovery succeeded",
+        "The API is responding again.\n\n" + action_summary,
+        color=5763719,
+        cooldown_key="recovery_succeeded",
+        cooldown_seconds=DISCORD_ALERT_COOLDOWN_SECONDS,
+    )
+    logger.info(
+        "BioTime recovery Discord notification: %s",
+        event_result,
     )

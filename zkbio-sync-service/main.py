@@ -4,7 +4,13 @@ import logging
 
 from attendance import get_attendance
 from auth import ZKBioClient
-from biotime_recovery import ProgressCallback, ensure_biotime_available
+from biotime_recovery import (
+    BioTimeRecoveryError,
+    DISCORD_ALERT_COOLDOWN_SECONDS,
+    ProgressCallback,
+    ensure_biotime_available,
+    send_discord_event,
+)
 from config import load_settings
 from employees import get_all_employees
 from logger import configure_logging
@@ -114,6 +120,27 @@ def main(progress_callback: ProgressCallback | None = None) -> None:
             error,
             settings.zkbio_password,
         )
+        if not isinstance(error, BioTimeRecoveryError):
+            error_message = f"{type(error).__name__}: {error}"
+            for secret in (
+                settings.zkbio_password,
+                settings.supabase_key,
+                settings.discord_webhook_url,
+            ):
+                if secret:
+                    error_message = error_message.replace(secret, "[REDACTED]")
+            _sent, notification_result = send_discord_event(
+                settings.discord_webhook_url,
+                "Attendance synchronization failed",
+                error_message,
+                color=15548997,
+                cooldown_key="sync_failed",
+                cooldown_seconds=DISCORD_ALERT_COOLDOWN_SECONDS,
+            )
+            logger.info(
+                "Sync failure Discord notification: %s",
+                notification_result,
+            )
         raise
 
     publish_safely(

@@ -122,6 +122,32 @@ class BioTimeRecoveryTests(unittest.TestCase):
         self.assertEqual(message, "Test notification sent successfully.")
         post.assert_called_once()
 
+    @patch("biotime_recovery.requests.post")
+    def test_important_discord_event_uses_cooldown(self, post: MagicMock) -> None:
+        post.return_value.ok = True
+        recovery._discord_event_times.clear()
+        webhook = "https://discord.com/api/webhooks/id/token"
+
+        first_sent, _ = recovery.send_discord_event(
+            webhook,
+            "Sync failed",
+            "First failure",
+            cooldown_key="test_failure",
+            cooldown_seconds=1800,
+        )
+        second_sent, second_result = recovery.send_discord_event(
+            webhook,
+            "Sync failed",
+            "Repeated failure",
+            cooldown_key="test_failure",
+            cooldown_seconds=1800,
+        )
+
+        self.assertTrue(first_sent)
+        self.assertFalse(second_sent)
+        self.assertIn("cooldown", second_result)
+        post.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

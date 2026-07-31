@@ -159,6 +159,17 @@ Treat the webhook URL like a password. Anyone who has it can post into that
 channel. Failed-recovery alerts are limited to one message every 30 minutes to
 prevent repeated notifications.
 
+Discord receives these important events:
+
+- Application started
+- Application closed normally
+- Synchronization failed
+- BioTime recovery succeeded after service intervention
+- BioTime recovery failed after the API retest
+
+Routine successful synchronization runs are not posted. Repeated sync failures
+and recovery-success messages use a 30-minute cooldown to avoid channel spam.
+
 ## Frontend service status
 
 Run `supabase_service_status.sql` once in the Supabase SQL editor. The desktop

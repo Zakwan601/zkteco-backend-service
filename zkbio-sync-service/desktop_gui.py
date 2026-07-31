@@ -223,6 +223,7 @@ class MainWindow(QMainWindow):
         self.pending_exit = False
         self._stopped_reported = False
         self._heartbeat_lock = threading.Lock()
+        self._discord_notification_lock = threading.Lock()
 
         self.setWindowTitle("School Attendance Sync")
         self.setMinimumSize(940, 650)
@@ -271,6 +272,7 @@ class MainWindow(QMainWindow):
         self.refresh_settings_form()
         self.refresh_logs()
         QTimer.singleShot(100, self.request_heartbeat)
+        QTimer.singleShot(300, self.notify_app_started)
         QTimer.singleShot(700, self.request_sync)
 
     def _build_shell(self) -> QWidget:
@@ -603,6 +605,7 @@ class MainWindow(QMainWindow):
         ).start()
 
     def _publish_heartbeat(self) -> None:
+        connections = None
         try:
             from config import load_settings
             from service_status import publish_heartbeat
@@ -614,6 +617,27 @@ class MainWindow(QMainWindow):
             )
         except Exception as error:
             logger.warning("Could not publish executable heartbeat: %s", error)
+            if connections is not None:
+                from biotime_recovery import (
+                    DISCORD_ALERT_COOLDOWN_SECONDS,
+                    send_discord_event,
+                )
+
+                safe_error = f"{type(error).__name__}: {error}"
+                for secret in (
+                    connections.supabase_key,
+                    connections.discord_webhook_url,
+                ):
+                    if secret:
+                        safe_error = safe_error.replace(secret, "[REDACTED]")
+                send_discord_event(
+                    connections.discord_webhook_url,
+                    "Supabase heartbeat failed",
+                    safe_error,
+                    color=15548997,
+                    cooldown_key="heartbeat_failed",
+                    cooldown_seconds=DISCORD_ALERT_COOLDOWN_SECONDS,
+                )
         finally:
             self._heartbeat_lock.release()
 
@@ -624,18 +648,74 @@ class MainWindow(QMainWindow):
         self._stopped_reported = True
         # Wait for any in-flight heartbeat so it cannot overwrite the offline
         # state after this final request completes.
-        with self._heartbeat_lock:
+        with self._heartbeat_lock, self._discord_notification_lock:
             try:
                 from config import load_settings
-                from service_status import publish_stopped
 
                 connections = load_settings()
+            except Exception as error:
+                logger.warning("Could not load shutdown settings: %s", error)
+                return
+
+            try:
+                from service_status import publish_stopped
+
                 publish_stopped(
                     connections.supabase_url,
                     connections.supabase_key,
                 )
             except Exception as error:
                 logger.warning("Could not publish executable shutdown: %s", error)
+
+            try:
+                from biotime_recovery import send_discord_event
+
+                _sent, result = send_discord_event(
+                    connections.discord_webhook_url,
+                    "Attendance Sync application stopped",
+                    "The application closed normally and is now offline.",
+                    color=9807270,
+                )
+                logger.info(
+                    "Application shutdown Discord notification: %s",
+                    result,
+                )
+            except Exception as error:
+                logger.warning("Could not send shutdown notification: %s", error)
+
+    def notify_app_started(self) -> None:
+        """Send one non-blocking application startup notification."""
+        threading.Thread(
+            target=self._notify_app_started,
+            name="discord-startup-notification",
+            daemon=True,
+        ).start()
+
+    def _notify_app_started(self) -> None:
+        with self._discord_notification_lock:
+            try:
+                from biotime_recovery import send_discord_event
+                from config import load_settings
+
+                connections = load_settings()
+                _sent, result = send_discord_event(
+                    connections.discord_webhook_url,
+                    "Attendance Sync application started",
+                    (
+                        "The application is online and will begin monitoring "
+                        "BioTime and synchronizing attendance."
+                    ),
+                    color=3447003,
+                )
+                logger.info(
+                    "Application startup Discord notification: %s",
+                    result,
+                )
+            except Exception as error:
+                logger.warning(
+                    "Could not send application startup notification: %s",
+                    error,
+                )
 
     def on_sync_started(self) -> None:
         self.set_status_icon("syncing")
