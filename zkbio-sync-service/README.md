@@ -64,6 +64,7 @@ ZKBIO_USERNAME=your_username
 ZKBIO_PASSWORD=your_password
 SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_KEY=your_server_side_key
+DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/webhook_id/webhook_token
 ```
 
 These values can also be edited from the desktop Settings page. Secrets remain
@@ -113,6 +114,50 @@ The dashboard displays:
 The interface never performs API work on the Qt main thread.
 `SyncWorker(QThread)` imports and calls the existing `main.main()` function.
 If a scheduled run is still active, an overlapping run is skipped.
+
+## BioTime API recovery
+
+Before each synchronization, the application calls the BioTime JWT login
+endpoint. If the endpoint is unavailable, it checks these BioTime services in
+dependency order:
+
+```text
+bio-pgsql
+bio-redis
+bio-cache
+bio-server
+bio-monitor
+bio-proxy
+bio-apache0
+```
+
+Only stopped BioTime services are started. If every service is already running
+but the API is unavailable, only `bio-server` is restarted. The application
+waits 15 seconds, tests the API again, and sends a Discord alert if it is still
+unavailable. Every check, service action, wait, retry, and notification result
+appears immediately in the dashboard banner, status bar, and log.
+
+The executable requests Administrator permission because Windows service
+control requires elevation. TCP/IP NetBIOS Helper and Windows Biometric Service
+are not automatically changed because they are Windows components rather than
+BioTime application services.
+
+## Discord alerts
+
+This integration uses a Discord incoming webhook, so it does not require a bot
+or a continuously connected Discord client.
+
+1. Open the destination channel in Discord.
+2. Open **Edit Channel**, then **Integrations** and **Webhooks**.
+3. Select **New Webhook**, choose its name/channel, and copy its webhook URL.
+4. Open this application's **Settings** page and paste the URL into
+   **Discord webhook**. Save the settings.
+5. Select **Test Discord** and confirm that the test message appears in the
+   selected channel.
+
+Treat the webhook URL like a password. Anyone who has it can post into that
+channel. Failed-recovery alerts are limited to one message every 30 minutes to
+prevent repeated notifications.
 
 ## Frontend service status
 

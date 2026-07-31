@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import threading
 
-from PySide6.QtCore import QTimer, Qt
+from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtGui import QAction, QCloseEvent, QFont
 from PySide6.QtWidgets import (
     QApplication,
@@ -41,21 +41,26 @@ HEARTBEAT_INTERVAL_MILLISECONDS = 5 * 60 * 1000
 
 logger = logging.getLogger(__name__)
 
-GREEN = "#22C55E"
-YELLOW = "#F59E0B"
-RED = "#EF4444"
-SLATE = "#64748B"
+GREEN = "#15803D"
+YELLOW = "#B45309"
+RED = "#DC2626"
+SLATE = "#475569"
 
 STYLESHEET = """
-QMainWindow, QWidget {
-    background: #F5F7FB;
+QWidget {
     color: #172033;
     font-family: "Segoe UI";
     font-size: 10pt;
 }
+QMainWindow {
+    background: #F4F7FC;
+}
 QFrame#sidebar {
-    background: #13213C;
+    background: #10203A;
     border: none;
+}
+QFrame#sidebar QLabel {
+    background: transparent;
 }
 QLabel#brand {
     color: white;
@@ -63,10 +68,15 @@ QLabel#brand {
     font-weight: 700;
 }
 QLabel#brandSub {
-    color: #A8B4CC;
+    color: #C3CEE0;
+}
+QLabel#sidebarCredit {
+    color: #B5C2D8;
+    font-size: 8.5pt;
+    line-height: 1.4;
 }
 QPushButton#navButton {
-    color: #DCE5F5;
+    color: #F1F5F9;
     background: transparent;
     border: none;
     border-radius: 8px;
@@ -76,17 +86,18 @@ QPushButton#navButton {
 }
 QPushButton#navButton:hover {
     background: #203455;
+    color: white;
 }
 QPushButton#primaryButton {
     color: white;
-    background: #2563EB;
+    background: #1D4ED8;
     border: none;
     border-radius: 8px;
     padding: 10px 18px;
     font-weight: 700;
 }
 QPushButton#primaryButton:hover {
-    background: #1D4ED8;
+    background: #1E40AF;
 }
 QPushButton#secondaryButton {
     color: #1E3A5F;
@@ -101,8 +112,29 @@ QPushButton#secondaryButton:hover {
 }
 QFrame#card {
     background: white;
-    border: 1px solid #E2E8F0;
-    border-radius: 12px;
+    border: 1px solid #DFE7F2;
+    border-radius: 14px;
+}
+QFrame#card:hover {
+    border: 1px solid #C8D6EA;
+}
+QFrame#hero {
+    background: #EAF2FF;
+    border: 1px solid #CFE0FF;
+    border-radius: 14px;
+}
+QLabel#heroTitle {
+    color: #173B72;
+    font-size: 13pt;
+    font-weight: 700;
+}
+QLabel#heroDetail {
+    color: #52709D;
+}
+QLabel#eyebrow {
+    color: #1D4ED8;
+    font-size: 8.5pt;
+    font-weight: 700;
 }
 QLabel#pageTitle {
     color: #13213C;
@@ -115,7 +147,7 @@ QLabel#sectionTitle {
     font-weight: 700;
 }
 QLabel#statusValue {
-    font-size: 13pt;
+    font-size: 14pt;
     font-weight: 700;
 }
 QLineEdit, QSpinBox {
@@ -137,6 +169,14 @@ QPlainTextEdit {
     font-family: "Cascadia Mono", "Consolas";
     font-size: 9pt;
 }
+QLabel {
+    background: transparent;
+}
+QStatusBar {
+    background: white;
+    color: #52627A;
+    border-top: 1px solid #E2E8F0;
+}
 """
 
 
@@ -144,23 +184,36 @@ class StatusCard(QFrame):
     def __init__(self, title: str, value: str, color: str = SLATE) -> None:
         super().__init__()
         self.setObjectName("card")
+        self.setMinimumHeight(96)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setContentsMargins(17, 14, 17, 15)
+        layout.setSpacing(7)
+        self.accent = QFrame()
+        self.accent.setFixedHeight(3)
+        self.accent.setStyleSheet(
+            f"background: {color}; border: none; border-radius: 1px;"
+        )
         title_label = QLabel(title)
         title_label.setStyleSheet("color: #64748B; font-weight: 600;")
         self.value_label = QLabel(value)
         self.value_label.setObjectName("statusValue")
         self.value_label.setStyleSheet(f"color: {color};")
+        layout.addWidget(self.accent)
         layout.addWidget(title_label)
         layout.addWidget(self.value_label)
 
     def set_value(self, value: str, color: str = SLATE) -> None:
         self.value_label.setText(value)
         self.value_label.setStyleSheet(f"color: {color};")
+        self.accent.setStyleSheet(
+            f"background: {color}; border: none; border-radius: 1px;"
+        )
 
 
 class MainWindow(QMainWindow):
     """Main dashboard and controller for the tray-first desktop app."""
+
+    discord_test_finished = Signal(bool, str)
 
     def __init__(self, settings: DesktopSettings) -> None:
         super().__init__()
@@ -209,9 +262,11 @@ class MainWindow(QMainWindow):
         self.heartbeat_timer.start(HEARTBEAT_INTERVAL_MILLISECONDS)
 
         self.worker.sync_started.connect(self.on_sync_started)
+        self.worker.sync_progress.connect(self.on_sync_progress)
         self.worker.sync_succeeded.connect(self.on_sync_succeeded)
         self.worker.sync_failed.connect(self.on_sync_failed)
         self.worker.finished.connect(self.on_worker_finished)
+        self.discord_test_finished.connect(self.on_discord_test_finished)
 
         self.refresh_settings_form()
         self.refresh_logs()
@@ -251,7 +306,11 @@ class MainWindow(QMainWindow):
             side_layout.addWidget(button)
 
         side_layout.addStretch()
-        version = QLabel("Desktop Service • v1.0")
+        credit = QLabel("Made by Zakwan\nFor issues: 01795111957")
+        credit.setObjectName("sidebarCredit")
+        side_layout.addWidget(credit)
+        side_layout.addSpacing(12)
+        version = QLabel("Desktop Service - v1.1")
         version.setObjectName("brandSub")
         side_layout.addWidget(version)
 
@@ -259,6 +318,10 @@ class MainWindow(QMainWindow):
         content_layout = QVBoxLayout(content)
         content_layout.setContentsMargins(28, 24, 28, 24)
         content_layout.addWidget(self.pages)
+        footer = QLabel("Made by Zakwan  |  For issues, contact: 01795111957")
+        footer.setStyleSheet("color: #8290A5; font-size: 8.5pt;")
+        footer.setAlignment(Qt.AlignmentFlag.AlignRight)
+        content_layout.addWidget(footer)
 
         layout.addWidget(sidebar)
         layout.addWidget(content, 1)
@@ -286,6 +349,27 @@ class MainWindow(QMainWindow):
         header.addWidget(sync_button)
         layout.addLayout(header)
 
+        hero = QFrame()
+        hero.setObjectName("hero")
+        hero_layout = QHBoxLayout(hero)
+        hero_layout.setContentsMargins(18, 15, 18, 15)
+        hero_text = QVBoxLayout()
+        hero_text.setSpacing(3)
+        eyebrow = QLabel("BACKGROUND SERVICE")
+        eyebrow.setObjectName("eyebrow")
+        self.service_state_label = QLabel("Starting service")
+        self.service_state_label.setObjectName("heroTitle")
+        self.service_detail_label = QLabel(
+            "Preparing the first synchronization and Supabase heartbeat."
+        )
+        self.service_detail_label.setObjectName("heroDetail")
+        hero_text.addWidget(eyebrow)
+        hero_text.addWidget(self.service_state_label)
+        hero_text.addWidget(self.service_detail_label)
+        hero_layout.addLayout(hero_text)
+        hero_layout.addStretch()
+        layout.addWidget(hero)
+
         cards = QGridLayout()
         cards.setSpacing(12)
         self.zkbio_card = StatusCard("ZKBioTime", "Waiting")
@@ -297,7 +381,7 @@ class MainWindow(QMainWindow):
         self.interval_card = StatusCard(
             "Sync interval",
             f"{self.settings.sync_interval} seconds",
-            "#2563EB",
+            "#1D4ED8",
         )
         cards.addWidget(self.zkbio_card, 0, 0)
         cards.addWidget(self.supabase_card, 0, 1)
@@ -348,6 +432,11 @@ class MainWindow(QMainWindow):
         self.supabase_url_input = QLineEdit()
         self.supabase_key_input = QLineEdit()
         self.supabase_key_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.discord_webhook_input = QLineEdit()
+        self.discord_webhook_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.discord_webhook_input.setPlaceholderText(
+            "Optional Discord incoming webhook URL"
+        )
         self.interval_input = QSpinBox()
         self.interval_input.setRange(15, 86400)
         self.interval_input.setSuffix(" seconds")
@@ -360,6 +449,7 @@ class MainWindow(QMainWindow):
         form.addRow("Password", self.password_input)
         form.addRow("Supabase URL", self.supabase_url_input)
         form.addRow("Supabase key", self.supabase_key_input)
+        form.addRow("Discord webhook", self.discord_webhook_input)
         form.addRow("Sync interval", self.interval_input)
         form.addRow("", self.startup_checkbox)
         form.addRow("", self.minimized_checkbox)
@@ -373,7 +463,11 @@ class MainWindow(QMainWindow):
         reload_button = QPushButton("Reload")
         reload_button.setObjectName("secondaryButton")
         reload_button.clicked.connect(self.refresh_settings_form)
+        self.test_discord_button = QPushButton("Test Discord")
+        self.test_discord_button.setObjectName("secondaryButton")
+        self.test_discord_button.clicked.connect(self.test_discord_webhook)
         actions.addStretch()
+        actions.addWidget(self.test_discord_button)
         actions.addWidget(reload_button)
         actions.addWidget(save_button)
         layout.addLayout(actions)
@@ -407,9 +501,30 @@ class MainWindow(QMainWindow):
         card_layout.addSpacing(8)
         card_layout.addWidget(description)
         card_layout.addWidget(detail)
+
+        developer_card = QFrame()
+        developer_card.setObjectName("card")
+        developer_layout = QVBoxLayout(developer_card)
+        developer_layout.setContentsMargins(24, 22, 24, 22)
+        developer_layout.setSpacing(7)
+        developer_eyebrow = QLabel("DEVELOPER & SUPPORT")
+        developer_eyebrow.setObjectName("eyebrow")
+        developer_name = QLabel("Made by Zakwan")
+        developer_name.setObjectName("sectionTitle")
+        developer_contact = QLabel("For issues, contact: 01795111957")
+        developer_contact.setStyleSheet("color: #52627A; font-size: 11pt;")
+        developer_contact.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        developer_layout.addWidget(developer_eyebrow)
+        developer_layout.addWidget(developer_name)
+        developer_layout.addWidget(developer_contact)
+
         layout.addWidget(title)
         layout.addSpacing(16)
         layout.addWidget(card)
+        layout.addSpacing(12)
+        layout.addWidget(developer_card)
         layout.addStretch()
         return page
 
@@ -464,7 +579,7 @@ class MainWindow(QMainWindow):
         interval = self.settings.sync_interval
         self.sync_timer.setInterval(interval * 1000)
         if hasattr(self, "interval_card"):
-            self.interval_card.set_value(f"{interval} seconds", "#2563EB")
+            self.interval_card.set_value(f"{interval} seconds", "#1D4ED8")
 
     def request_sync(self) -> None:
         if self.worker.isRunning():
@@ -524,10 +639,28 @@ class MainWindow(QMainWindow):
 
     def on_sync_started(self) -> None:
         self.set_status_icon("syncing")
+        self.service_state_label.setText("Synchronization in progress")
+        self.service_detail_label.setText(
+            "Downloading the latest device, student, and attendance data."
+        )
         self.zkbio_card.set_value("Synchronizing", YELLOW)
         self.supabase_card.set_value("Synchronizing", YELLOW)
         self.statusBar().showMessage("Synchronization in progress…")
         logger.info("Desktop synchronization started")
+
+    def on_sync_progress(self, title: str, detail: str, level: str) -> None:
+        """Show live API checks and service-recovery actions."""
+        colors = {
+            "working": YELLOW,
+            "success": GREEN,
+            "error": RED,
+        }
+        color = colors.get(level, YELLOW)
+        self.service_state_label.setText(title)
+        self.service_detail_label.setText(detail)
+        self.zkbio_card.set_value(title, color)
+        self.statusBar().showMessage(f"{title}: {detail}")
+        self.refresh_logs()
 
     def on_sync_succeeded(self, completed_at: str) -> None:
         self.settings.last_successful_sync = completed_at
@@ -535,6 +668,10 @@ class MainWindow(QMainWindow):
         self.zkbio_card.set_value("Connected", GREEN)
         self.supabase_card.set_value("Connected", GREEN)
         self.set_status_icon("idle")
+        self.service_state_label.setText("Service is running normally")
+        self.service_detail_label.setText(
+            f"Last successful synchronization: {completed_at}"
+        )
         self.statusBar().showMessage("Synchronization completed successfully.", 5000)
         self.refresh_logs()
         if self.settings.notifications_enabled:
@@ -549,6 +686,10 @@ class MainWindow(QMainWindow):
         self.zkbio_card.set_value("Error", RED)
         self.supabase_card.set_value("Error", RED)
         self.set_status_icon("error")
+        self.service_state_label.setText("Synchronization needs attention")
+        self.service_detail_label.setText(
+            "The service is still running and will retry automatically."
+        )
         self.statusBar().showMessage(f"Synchronization failed: {message}", 8000)
         self.refresh_logs()
         if self.settings.notifications_enabled:
@@ -590,6 +731,7 @@ class MainWindow(QMainWindow):
         self.password_input.setText(connections.zkbio_password)
         self.supabase_url_input.setText(connections.supabase_url)
         self.supabase_key_input.setText(connections.supabase_key)
+        self.discord_webhook_input.setText(connections.discord_webhook_url)
         self.interval_input.setValue(self.settings.sync_interval)
         self.startup_checkbox.setChecked(self.settings.start_with_windows)
         self.minimized_checkbox.setChecked(self.settings.start_minimized)
@@ -604,6 +746,7 @@ class MainWindow(QMainWindow):
             zkbio_password=self.password_input.text(),
             supabase_url=self.supabase_url_input.text(),
             supabase_key=self.supabase_key_input.text(),
+            discord_webhook_url=self.discord_webhook_input.text(),
         )
         try:
             self.settings.save_connections(form)
@@ -630,6 +773,40 @@ class MainWindow(QMainWindow):
             "Settings saved",
             "Your settings were saved successfully.",
         )
+
+    def test_discord_webhook(self) -> None:
+        """Send a test webhook without blocking the Qt interface."""
+        webhook_url = self.discord_webhook_input.text().strip()
+        if not webhook_url:
+            QMessageBox.warning(
+                self,
+                "Discord webhook",
+                "Enter a Discord webhook URL first.",
+            )
+            return
+
+        self.test_discord_button.setEnabled(False)
+        self.statusBar().showMessage("Sending Discord test notification…")
+
+        def send_test() -> None:
+            from biotime_recovery import send_discord_test
+
+            succeeded, message = send_discord_test(webhook_url)
+            self.discord_test_finished.emit(succeeded, message)
+
+        threading.Thread(
+            target=send_test,
+            name="discord-webhook-test",
+            daemon=True,
+        ).start()
+
+    def on_discord_test_finished(self, succeeded: bool, message: str) -> None:
+        self.test_discord_button.setEnabled(True)
+        self.statusBar().showMessage(message, 6000)
+        if succeeded:
+            QMessageBox.information(self, "Discord webhook", message)
+        else:
+            QMessageBox.warning(self, "Discord webhook", message)
 
     def view_logs(self) -> None:
         try:

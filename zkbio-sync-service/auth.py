@@ -28,7 +28,7 @@ class ZKBioClient:
             return path_or_url
         return urljoin(self.base_url, path_or_url.lstrip("/"))
 
-    def get_token(self) -> str:
+    def get_token(self, timeout: float | None = None) -> str:
         """Return the cached JWT, requesting one when necessary."""
         if self.token is not None:
             return self.token
@@ -39,7 +39,7 @@ class ZKBioClient:
                 "username": self.username,
                 "password": self.password,
             },
-            timeout=self.timeout,
+            timeout=self.timeout if timeout is None else timeout,
         )
         response.raise_for_status()
 

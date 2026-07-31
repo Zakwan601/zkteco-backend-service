@@ -12,6 +12,7 @@ class SyncWorker(QThread):
     """Call main.main() away from the GUI thread."""
 
     sync_started = Signal()
+    sync_progress = Signal(str, str, str)
     sync_succeeded = Signal(str)
     sync_failed = Signal(str)
 
@@ -20,7 +21,7 @@ class SyncWorker(QThread):
         try:
             from main import main as run_existing_sync
 
-            run_existing_sync()
+            run_existing_sync(progress_callback=self.sync_progress.emit)
         except Exception as error:
             message = f"{type(error).__name__}: {error}"
             logger.exception("Desktop synchronization failed")

@@ -19,6 +19,7 @@ class ConnectionForm:
     zkbio_password: str
     supabase_url: str
     supabase_key: str
+    discord_webhook_url: str = ""
 
 
 class DesktopSettings:
@@ -92,6 +93,7 @@ class DesktopSettings:
             zkbio_password=str(values.get("ZKBIO_PASSWORD") or ""),
             supabase_url=str(values.get("SUPABASE_URL") or ""),
             supabase_key=str(values.get("SUPABASE_KEY") or ""),
+            discord_webhook_url=str(values.get("DISCORD_WEBHOOK_URL") or ""),
         )
 
     def save_connections(self, form: ConnectionForm) -> None:
@@ -102,8 +104,16 @@ class DesktopSettings:
             "ZKBIO_PASSWORD": form.zkbio_password,
             "SUPABASE_URL": form.supabase_url.strip().rstrip("/"),
             "SUPABASE_KEY": form.supabase_key,
+            "DISCORD_WEBHOOK_URL": form.discord_webhook_url.strip(),
         }
-        missing = [name for name, value in values.items() if not value]
+        required_names = (
+            "ZKBIO_URL",
+            "ZKBIO_USERNAME",
+            "ZKBIO_PASSWORD",
+            "SUPABASE_URL",
+            "SUPABASE_KEY",
+        )
+        missing = [name for name in required_names if not values[name]]
         if missing:
             raise ValueError(
                 "Complete all connection fields: " + ", ".join(missing)

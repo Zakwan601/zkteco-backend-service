@@ -13,6 +13,7 @@ class Settings:
     zkbio_password: str
     supabase_url: str
     supabase_key: str
+    discord_webhook_url: str = ""
 
 
 def load_settings() -> Settings:
@@ -25,8 +26,16 @@ def load_settings() -> Settings:
         "ZKBIO_PASSWORD": os.getenv("ZKBIO_PASSWORD", ""),
         "SUPABASE_URL": os.getenv("SUPABASE_URL", "").strip(),
         "SUPABASE_KEY": os.getenv("SUPABASE_KEY", ""),
+        "DISCORD_WEBHOOK_URL": os.getenv("DISCORD_WEBHOOK_URL", "").strip(),
     }
-    missing = [name for name, value in values.items() if not value]
+    required_names = (
+        "ZKBIO_URL",
+        "ZKBIO_USERNAME",
+        "ZKBIO_PASSWORD",
+        "SUPABASE_URL",
+        "SUPABASE_KEY",
+    )
+    missing = [name for name in required_names if not values[name]]
     if missing:
         missing_names = ", ".join(missing)
         raise ValueError(f"Missing required environment variables: {missing_names}")
@@ -37,4 +46,5 @@ def load_settings() -> Settings:
         zkbio_password=values["ZKBIO_PASSWORD"],
         supabase_url=values["SUPABASE_URL"].rstrip("/"),
         supabase_key=values["SUPABASE_KEY"],
+        discord_webhook_url=values["DISCORD_WEBHOOK_URL"],
     )

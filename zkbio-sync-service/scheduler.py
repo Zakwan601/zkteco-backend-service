@@ -12,6 +12,7 @@ from typing import Any
 
 from attendance import get_attendance
 from auth import ZKBioClient
+from biotime_recovery import ensure_biotime_available
 from config import Settings, load_settings
 from employees import get_all_employees
 from state import get_attendance_timestamp, load_last_sync_time, save_last_sync_time
@@ -211,7 +212,11 @@ class BackgroundScheduler:
                     self._settings.supabase_key,
                 )
                 self._set_status(supabase_status="Configured")
-                self._client.get_token()
+                ensure_biotime_available(
+                    self._client,
+                    self._settings.discord_webhook_url,
+                    self._scheduler_recovery_progress,
+                )
                 self._set_status(
                     zkbio_status="Connected",
                     service_status="Running",
@@ -230,6 +235,16 @@ class BackgroundScheduler:
                     return False
                 delay = min(delay * 2, MAX_BACKOFF_SECONDS)
         return False
+
+    def _scheduler_recovery_progress(
+        self,
+        title: str,
+        detail: str,
+        level: str,
+    ) -> None:
+        status = "Connected" if level == "success" else title
+        self._set_status(zkbio_status=status)
+        logger.info("%s: %s", title, detail)
 
     def _sync_employees(self) -> None:
         if self._client is None:

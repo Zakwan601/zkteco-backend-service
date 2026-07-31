@@ -4,6 +4,7 @@ import logging
 
 from attendance import get_attendance
 from auth import ZKBioClient
+from biotime_recovery import ProgressCallback, ensure_biotime_available
 from config import load_settings
 from employees import get_all_employees
 from logger import configure_logging
@@ -32,7 +33,7 @@ from terminals import get_all_terminals
 logger = logging.getLogger(__name__)
 
 
-def main() -> None:
+def main(progress_callback: ProgressCallback | None = None) -> None:
     configure_logging()
     settings = load_settings()
     publish_safely(
@@ -48,9 +49,12 @@ def main() -> None:
             username=settings.zkbio_username,
             password=settings.zkbio_password,
         )
+        ensure_biotime_available(
+            client,
+            settings.discord_webhook_url,
+            progress_callback,
+        )
         configure_supabase(settings.supabase_url, settings.supabase_key)
-
-        client.get_token()
         logger.info("Logged into ZKBioTime")
 
         terminals = get_all_terminals(client)
