@@ -27,6 +27,7 @@ from service_status import (
     publish_sync_succeeded,
 )
 from state import (
+    attendance_query_start,
     get_attendance_timestamp,
     load_last_sync_time,
     load_record_fingerprints,
@@ -106,28 +107,32 @@ def main(progress_callback: ProgressCallback | None = None) -> None:
         last_sync_time = load_last_sync_time()
         logger.info("Last sync time: %s", last_sync_time)
 
-        attendance_records = get_attendance(client, start_time=last_sync_time)
+        query_start_time = attendance_query_start(last_sync_time)
+        attendance_records = get_attendance(client, start_time=query_start_time)
         logger.info(
-            "Downloaded %d new attendance records",
+            "Downloaded %d attendance records from overlap window starting %s",
             len(attendance_records),
+            query_start_time,
         )
 
         uploaded_timestamps: list[str] = []
+        inserted_attendance = 0
         for attendance in attendance_records:
             inserted, _response = upsert_attendance_with_status(attendance)
             timestamp = get_attendance_timestamp(attendance)
             uploaded_timestamps.append(timestamp)
             if inserted:
+                inserted_attendance += 1
                 selected_date = punch_date(timestamp)
                 queue_attendance_day(selected_date)
-        logger.info("Uploaded %d attendance records", len(attendance_records))
+        logger.info("Uploaded %d new attendance records", inserted_attendance)
 
         sync_pending_attendance_days(
             settings.sync_attendance_url,
             settings.sync_attendance_secret,
         )
 
-        newest_sync_time = max(uploaded_timestamps, default=last_sync_time)
+        newest_sync_time = max([last_sync_time, *uploaded_timestamps])
         save_last_sync_time(newest_sync_time)
         logger.info("Updated sync state")
     except Exception as error:

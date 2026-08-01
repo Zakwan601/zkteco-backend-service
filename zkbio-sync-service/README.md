@@ -215,9 +215,11 @@ It can be disabled again from the same Settings page.
 
 ## Attendance recovery and duplicate prevention
 
-The existing `data/state.json` logic remains active. Attendance is requested
-using the last successfully uploaded punch timestamp. The state file advances
-only after a full downloaded batch uploads successfully.
+The existing `data/state.json` logic remains active. Attendance requests use a
+24-hour overlap before the last successfully uploaded punch timestamp. This
+catches transactions that BioTime uploads late or records with a back-dated
+device clock. Existing Supabase duplicate checks make the overlap safe, and the
+state cursor never moves backward.
 
 The same state file stores non-reversible fingerprints for successfully
 uploaded devices and employees. A record is sent to Supabase only when it is

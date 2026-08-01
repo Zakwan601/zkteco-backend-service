@@ -21,7 +21,12 @@ from auth import ZKBioClient
 from biotime_recovery import ensure_biotime_available
 from config import Settings, load_settings
 from employees import get_all_employees
-from state import get_attendance_timestamp, load_last_sync_time, save_last_sync_time
+from state import (
+    attendance_query_start,
+    get_attendance_timestamp,
+    load_last_sync_time,
+    save_last_sync_time,
+)
 from service_status import publish_heartbeat, publish_safely, publish_stopped
 from supabase_client import (
     configure_supabase,
@@ -292,10 +297,11 @@ class BackgroundScheduler:
             raise RuntimeError("ZKBioTime client is not initialized")
 
         last_sync_time = load_last_sync_time()
+        query_start_time = attendance_query_start(last_sync_time)
         try:
             records = get_attendance(
                 self._client,
-                start_time=last_sync_time,
+                start_time=query_start_time,
             )
             self._set_status(zkbio_status="Connected")
         except Exception:
@@ -318,12 +324,14 @@ class BackgroundScheduler:
             return
 
         uploaded_timestamps: list[str] = []
+        inserted_attendance = 0
         try:
             for record in records:
                 inserted, _response = upsert_attendance_with_status(record)
                 timestamp = get_attendance_timestamp(record)
                 uploaded_timestamps.append(timestamp)
                 if inserted:
+                    inserted_attendance += 1
                     selected_date = punch_date(timestamp)
                     queue_attendance_day(selected_date)
 
@@ -338,13 +346,17 @@ class BackgroundScheduler:
             self._set_status(supabase_status="Upload failed")
             raise
 
-        save_last_sync_time(max(uploaded_timestamps))
+        save_last_sync_time(max([last_sync_time, *uploaded_timestamps]))
         completed_at = datetime.now().astimezone().isoformat(timespec="seconds")
         with self._status_lock:
             self._status.last_attendance_sync = completed_at
-            self._status.attendance_uploaded += len(records)
+            self._status.attendance_uploaded += inserted_attendance
             self._status.last_error = "None"
-        logger.info("Uploaded %d attendance records", len(records))
+        logger.info(
+            "Uploaded %d new attendance records (%d checked from overlap window)",
+            inserted_attendance,
+            len(records),
+        )
 
     def _run_job(self, name: str) -> float:
         lock = self._employee_lock if name == "employee" else self._attendance_lock

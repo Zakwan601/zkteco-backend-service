@@ -8,6 +8,7 @@ from typing import Any
 
 STATE_FILE = Path(__file__).resolve().parent / "data" / "state.json"
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
+ATTENDANCE_LOOKBACK = timedelta(hours=24)
 ATTENDANCE_TIMESTAMP_FIELDS = ("punch_time", "timestamp", "att_time")
 RECORD_FINGERPRINTS_KEY = "record_fingerprints"
 PENDING_ATTENDANCE_DATES_KEY = "pending_attendance_dates"
@@ -52,6 +53,17 @@ def load_last_sync_time() -> str:
         raise ValueError("last_sync_time must be a non-empty string")
 
     return last_sync_time
+
+
+def attendance_query_start(last_sync_time: str) -> str:
+    """Re-read a lookback window to catch delayed or back-dated punches."""
+    try:
+        parsed = datetime.strptime(last_sync_time, TIME_FORMAT)
+    except ValueError as exc:
+        raise ValueError(
+            f"last_sync_time must use the format {TIME_FORMAT}"
+        ) from exc
+    return (parsed - ATTENDANCE_LOOKBACK).strftime(TIME_FORMAT)
 
 
 def save_last_sync_time(last_sync_time: str) -> None:
